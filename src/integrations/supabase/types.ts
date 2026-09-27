@@ -181,6 +181,7 @@ export type Database = {
           created_at: string;
           ico: string | null;
           id: string;
+          identity_key: string | null;
           incorporated_at: string | null;
           kind: string;
           licence: string | null;
@@ -203,6 +204,7 @@ export type Database = {
           created_at?: string;
           ico?: string | null;
           id?: string;
+          identity_key?: string | null;
           incorporated_at?: string | null;
           kind?: string;
           licence?: string | null;
@@ -225,6 +227,7 @@ export type Database = {
           created_at?: string;
           ico?: string | null;
           id?: string;
+          identity_key?: string | null;
           incorporated_at?: string | null;
           kind?: string;
           licence?: string | null;
@@ -391,6 +394,8 @@ export type Database = {
           to_id: string | null;
           updated_at: string;
           user_id: string;
+          valid_from: string | null;
+          valid_to: string | null;
         };
         Insert: {
           case_id: string;
@@ -402,6 +407,8 @@ export type Database = {
           to_id?: string | null;
           updated_at?: string;
           user_id?: string;
+          valid_from?: string | null;
+          valid_to?: string | null;
         };
         Update: {
           case_id?: string;
@@ -413,6 +420,8 @@ export type Database = {
           to_id?: string | null;
           updated_at?: string;
           user_id?: string;
+          valid_from?: string | null;
+          valid_to?: string | null;
         };
         Relationships: [
           {
@@ -970,6 +979,10 @@ export type Database = {
       [_ in never]: never;
     };
     Functions: {
+      commit_ai_case_graph: {
+        Args: { _case_id: string; _graph: Json };
+        Returns: Json;
+      };
       commit_import: {
         Args: { _actor: string; _import: string; _rows: Json };
         Returns: number;

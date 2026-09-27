@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { normalizeDate, toTimelineInput } from "@/lib/case-graph.functions";
+import {
+  buildGraphCommit,
+  normalizeDate,
+  toTimelineInput,
+} from "@/lib/case-graph.functions";
 
 describe("prenos výsledku AI do grafu a časovej osi", () => {
   it("normalizuje bežné tvary dátumu", () => {
@@ -38,5 +42,26 @@ describe("prenos výsledku AI do grafu a časovej osi", () => {
   it("prázdny alebo neplatný dossier nevyhodí chybu", () => {
     expect(toTimelineInput(null)).toEqual([]);
     expect(toTimelineInput({ facts: {} })).toEqual([]);
+  });
+
+  it("neprepojí homonymá a prenáša dátum vzťahu", () => {
+    const graph = buildGraphCommit({
+      caseId: "a0c66f51-f624-42bf-96bb-981f54c98409",
+      persons: [
+        { name: "Ján Novák", role: "svedok" },
+        { name: "Ján Novák", role: "konateľ" },
+        { name: "Eva Malá" },
+      ],
+      companies: [],
+      timeline: [
+        {
+          date: "12.08.2026",
+          event: "Stretnutie",
+          actors: ["Ján Novák", "Eva Malá"],
+        },
+      ],
+    });
+    expect(graph.entities).toHaveLength(3);
+    expect(graph.relations).toEqual([]);
   });
 });

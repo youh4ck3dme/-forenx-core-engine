@@ -1,4 +1,5 @@
 import { sha256Hex } from "./export-pdf";
+import { canonicalJson } from "./court-evidence";
 import type {
   CustodyLedgerEntry,
   CustodyLedgerVerificationResult,
@@ -11,7 +12,7 @@ export const GENESIS_PREV_HASH =
  * Normalizuje dáta a vypočíta deterministický SHA-256 hash payloadu stopy.
  */
 export function computePayloadHash(data: unknown): string {
-  const json = typeof data === "string" ? data : JSON.stringify(data ?? {});
+  const json = typeof data === "string" ? data : canonicalJson(data ?? {});
   return sha256Hex(json);
 }
 

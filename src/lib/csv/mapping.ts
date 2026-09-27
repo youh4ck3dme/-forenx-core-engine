@@ -5,6 +5,7 @@ import {
   type DateFormat,
   type DecimalSeparator,
 } from "./parse";
+import { fromMoneyCents, toMoneyCents } from "@/forensic/core/money";
 
 /** Ktorý stĺpec súboru zodpovedá ktorému poľu transakcie. -1 = nepriradené. */
 export type ColumnMapping = {
@@ -151,8 +152,10 @@ export function validateRows(
 
     parties.add(from);
     parties.add(to);
-    totals[currency] =
-      Math.round(((totals[currency] ?? 0) + Math.abs(amount)) * 100) / 100;
+    totals[currency] = fromMoneyCents(
+      (toMoneyCents(totals[currency] ?? 0) +
+        toMoneyCents(Math.abs(amount))) as ReturnType<typeof toMoneyCents>,
+    );
     valid.push({
       sourceRow,
       date,

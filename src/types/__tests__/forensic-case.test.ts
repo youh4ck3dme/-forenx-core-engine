@@ -342,6 +342,25 @@ describe("ForensicCase Schema Types", () => {
       const result = CaseEntitySchema.safeParse(entity);
       expect(assertValidParse(result).country).toBe("SK");
     });
+
+    it("prijíma iba štruktúrovaný, registračný identifikačný kľúč", () => {
+      expect(
+        CaseEntitySchema.safeParse({
+          id: "ent-1",
+          name: "Dve rovnaké mená nie sú kľúč",
+          kind: "company",
+          identityKey: { scheme: "ico", value: "12345678" },
+        }).success,
+      ).toBe(true);
+      expect(
+        CaseEntitySchema.safeParse({
+          id: "ent-1",
+          name: "Neplatný kľúč",
+          kind: "company",
+          identityKey: { scheme: "ico", value: "meno firmy" },
+        }).success,
+      ).toBe(false);
+    });
   });
 
   describe("CaseSourceRefSchema", () => {

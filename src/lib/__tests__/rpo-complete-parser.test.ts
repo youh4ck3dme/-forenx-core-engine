@@ -198,12 +198,25 @@ const PAPI_HAIR_RPO = {
 describe("RPO ŠÚ SR — kompletný parser (Papi Hair Design)", () => {
   const parsed = parseOfficialRpoEntity(PAPI_HAIR_RPO);
 
-  it("extrahuje všetkých 13 predmetov činnosti", () => {
-    expect(parsed.activities).toHaveLength(13);
-    expect(parsed.activities[0]).toBe("Pánske, dámske a detské kaderníctvo");
-    expect(parsed.activities[12]).toBe(
+  it("pre IČO 54684994 deterministicky extrahuje presne všetkých 13 predmetov činnosti", () => {
+    const expected = [
+      "Pánske, dámske a detské kaderníctvo",
+      "Kúpa tovaru na účely jeho predaja konečnému spotrebiteľovi (maloobchod) alebo iným prevádzkovateľom živnosti (veľkoobchod)",
+      "Sprostredkovateľská činnosť v oblasti obchodu, služieb, výroby",
+      "Vykonávanie mimoškolskej vzdelávacej činnosti",
+      "Organizovanie športových, kultúrnych a iných spoločenských podujatí",
+      "Výroba chemikálií, chemických vlákien, plastov, kaučuku a prípravkov z týchto materiálov",
+      "Služby súvisiace s produkciou filmov, videozáznamov a zvukových nahrávok",
+      "Prenájom nehnuteľností spojený s poskytovaním iných než základných služieb spojených s prenájmom",
+      "Prenájom hnuteľných vecí",
+      "Reklamné a marketingové služby, prieskum trhu a verejnej mienky",
+      "Služby súvisiace so skrášľovaním tela",
+      "Prevádzka malých plavidiel",
       "Poskytovanie služieb rýchleho občerstvenia v spojení s predajom na priamu konzumáciu, prevádzkovanie výdajne stravy",
-    );
+    ];
+    expect(parsed.ico).toBe("54684994");
+    expect(parsed.activities).toEqual(expected);
+    expect(parseOfficialRpoEntity(PAPI_HAIR_RPO).activities).toEqual(expected);
   });
 
   it("berie meno spoločníka z personName.formatedName, nie surové ID", () => {
@@ -235,6 +248,13 @@ describe("RPO ŠÚ SR — kompletný parser (Papi Hair Design)", () => {
     );
     expect(parsed.mainActivity).toBe("9621 - Kadernícke a holičské služby");
     expect(parsed.ico).toBe("54684994");
+  });
+
+  it("zachováva zdrojový časový rozsah podielu", () => {
+    expect(parsed.stakeholders[0]).toMatchObject({
+      validFrom: "2022-06-16",
+      validTo: null,
+    });
   });
 
   it("prenesie tie isté polia do profilu, ktorý vidí modal", () => {

@@ -100,10 +100,35 @@ export const CaseEntityPositionSchema = z.object({
   y: z.number().default(100),
 });
 
+/**
+ * A display name is never an identity: two natural persons can share one and
+ * company names can change.  Only registry-issued identifiers may be used to
+ * merge entities automatically.
+ */
+export const CaseEntityIdentityKeySchema = z.discriminatedUnion("scheme", [
+  z.object({ scheme: z.literal("ico"), value: z.string().regex(/^\d{8}$/) }),
+  z.object({
+    scheme: z.literal("registry"),
+    registry: z.string().trim().min(1).max(64),
+    value: z.string().trim().min(1).max(160),
+  }),
+  z.object({
+    scheme: z.literal("person_reference"),
+    issuer: z.string().trim().min(1).max(64),
+    value: z.string().trim().min(1).max(160),
+  }),
+]);
+
+export type CaseEntityIdentityKey = z.infer<
+  typeof CaseEntityIdentityKeySchema
+>;
+
 export const CaseEntitySchema = z.object({
   id: z.string(),
   name: z.string(),
   kind: z.enum(["person", "company"]),
+  /** Omitted means the entity is unresolved and must not be name-merged. */
+  identityKey: CaseEntityIdentityKeySchema.optional(),
   role: z.string().default(""),
   ico: z.string().optional(),
   country: z.string().default("SK"),
@@ -162,6 +187,8 @@ export const CaseRelationshipSchema = z.object({
   label: z.string(),
   weight: z.number().default(1),
   sourceRef: z.string().optional(),
+  validFrom: z.string().date().optional(),
+  validTo: z.string().date().optional(),
 });
 
 export type CaseRelationship = z.infer<typeof CaseRelationshipSchema>;

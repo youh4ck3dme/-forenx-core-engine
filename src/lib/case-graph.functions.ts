@@ -2,16 +2,9 @@ import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 
-/**
- * Prenesie výsledok AI (osoby, firmy, časová os) do dát prípadu,
- * aby sa zobrazil v sieťovom grafe a v časovej osi.
- * Zápis je idempotentný — rovnaký spis spustený dvakrát nevytvorí duplicity.
- */
-
 const MAX_ENTITIES = 60;
 const MAX_EVENTS = 60;
 const MAX_RELATIONS = 80;
-
 const nameSchema = z.string().trim().min(2).max(160);
 
 const inputSchema = z.object({
@@ -21,11 +14,21 @@ const inputSchema = z.object({
       z.object({
         name: nameSchema,
         role: z.string().trim().max(120).optional(),
+        /** Registry-issued key only; a name is intentionally not accepted here. */
+        identityKey: z.string().trim().min(3).max(160).optional(),
       }),
     )
     .max(200)
     .default([]),
-  companies: z.array(nameSchema).max(200).default([]),
+  companies: z
+    .array(
+      z.object({
+        name: nameSchema,
+        identityKey: z.string().trim().min(3).max(160).optional(),
+      }),
+    )
+    .max(200)
+    .default([]),
   timeline: z
     .array(
       z.object({
@@ -39,235 +42,152 @@ const inputSchema = z.object({
     .default([]),
 });
 
+const commitResultSchema = z.object({
+  entities: z.number().int().nonnegative(),
+  events: z.number().int().nonnegative(),
+  relations: z.number().int().nonnegative(),
+});
+
+type GraphEntity = {
+  key: string;
+  name: string;
+  kind: "person" | "company";
+  role: string;
+  x: number;
+  y: number;
+  identityKey?: string;
+};
+
 export type ApplyAiResultsInput = z.input<typeof inputSchema>;
 
 /** Prevedie rôzne tvary dátumu z AI na RRRR-MM-DD; inak vráti null. */
 export function normalizeDate(raw: string | undefined): string | null {
   if (!raw) return null;
   const text = raw.trim();
-  const iso = text.match(/(\d{4})-(\d{2})-(\d{2})/);
+  const iso = text.match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`;
-  const dotted = text.match(/(\d{1,2})\s*\.\s*(\d{1,2})\s*\.\s*(\d{4})/);
+  const dotted = text.match(/^(\d{1,2})\s*\.\s*(\d{1,2})\s*\.\s*(\d{4})$/);
   if (dotted) {
-    const day = dotted[1]!.padStart(2, "0");
-    const month = dotted[2]!.padStart(2, "0");
-    return `${dotted[3]}-${month}-${day}`;
+    return `${dotted[3]}-${dotted[2]!.padStart(2, "0")}-${dotted[1]!.padStart(2, "0")}`;
   }
-  const monthOnly = text.match(/^(\d{4})-(\d{2})$/);
-  if (monthOnly) return `${monthOnly[1]}-${monthOnly[2]}-01`;
-  const yearOnly = text.match(/^(\d{4})$/);
-  if (yearOnly) return `${yearOnly[1]}-01-01`;
+  if (/^\d{4}-\d{2}$/.test(text)) return `${text}-01`;
+  if (/^\d{4}$/.test(text)) return `${text}-01-01`;
   return null;
 }
 
-function normalizeKey(value: string): string {
-  return value.trim().toLowerCase().replace(/\s+/g, " ");
+function normalizedName(value: string): string {
+  return value.trim().toLocaleLowerCase("sk").replace(/\s+/g, " ");
+}
+
+/**
+ * Builds relation keys only for uniquely named entities in this submission.
+ * Ambiguous homonyms are deliberately not linked by an AI inference.
+ */
+export function buildGraphCommit(input: z.output<typeof inputSchema>) {
+  const entities: GraphEntity[] = [];
+  for (const [kind, items] of [
+    ["person", input.persons],
+    ["company", input.companies],
+  ] as const) {
+    for (const item of items) {
+      if (entities.length === MAX_ENTITIES) break;
+      const index = entities.length;
+      entities.push({
+        key: `ai-${kind}-${index}`,
+        name: item.name,
+        kind,
+        role: kind === "person" && "role" in item ? item.role || "osoba" : "firma",
+        x: 80 + (index % 5) * 90,
+        y: 80 + Math.floor(index / 5) * 90,
+        ...(item.identityKey ? { identityKey: item.identityKey } : {}),
+      });
+    }
+  }
+  const keysByName = new Map<string, string[]>();
+  for (const entity of entities) {
+    const name = normalizedName(entity.name);
+    keysByName.set(name, [...(keysByName.get(name) ?? []), entity.key]);
+  }
+
+  const events = input.timeline
+    .map((item) => {
+      const title = (item.event ?? item.detail ?? "").trim();
+      if (!title) return null;
+      return {
+        date: normalizeDate(item.date) ?? null,
+        title: title.slice(0, 160),
+        detail: (item.detail ?? item.event ?? "").slice(0, 600),
+        actors: item.actors ?? [],
+      };
+    })
+    .filter((item): item is NonNullable<typeof item> => item !== null)
+    .slice(0, MAX_EVENTS);
+  const relations = events.flatMap((event) => {
+    if (!event.date) return [];
+    const actorKeys = event.actors
+      .map((actor) => keysByName.get(normalizedName(actor)))
+      .filter((keys): keys is [string] => keys?.length === 1)
+      .map(([key]) => key);
+    const uniqueActorKeys = [...new Set(actorKeys)];
+    const pairs: {
+      fromKey: string;
+      toKey: string;
+      label: string;
+      validFrom: string;
+    }[] = [];
+    for (let i = 0; i < uniqueActorKeys.length; i += 1)
+      for (let j = i + 1; j < uniqueActorKeys.length; j += 1)
+        pairs.push({
+          fromKey: uniqueActorKeys[i]!,
+          toKey: uniqueActorKeys[j]!,
+          label: event.title.slice(0, 80),
+          validFrom: event.date,
+        });
+    return pairs;
+  });
+  return {
+    entities,
+    events: events
+      .filter((event): event is typeof event & { date: string } => !!event.date)
+      .map(({ actors: _actors, ...event }) => event),
+    relations: relations.slice(0, MAX_RELATIONS),
+  };
 }
 
 export const applyAiResultsToCase = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .validator((input: unknown) => inputSchema.parse(input))
   .handler(async ({ data, context }) => {
-    const { caseId } = data;
-    const supabase = context.supabase;
-
-    const { data: caseRow, error: caseError } = await supabase
-      .from("cases")
-      .select("id, reference_date")
-      .eq("id", caseId)
-      .maybeSingle();
-    if (caseError)
-      throw new Error(`Prípad sa nepodarilo načítať. (${caseError.message})`);
-    if (!caseRow)
-      throw new Error("Prípad sa nenašiel alebo naň nemáte oprávnenie.");
-
-    const fallbackDate =
-      (caseRow as { reference_date?: string }).reference_date ??
-      new Date().toISOString().slice(0, 10);
-
-    /* ------------------------------- entity ------------------------------- */
-    const { data: existingEntities, error: entitiesError } = await supabase
-      .from("case_entities")
-      .select("id, name")
-      .eq("case_id", caseId);
-    if (entitiesError)
-      throw new Error(
-        `Entity sa nepodarilo načítať. (${entitiesError.message})`,
-      );
-
-    const byName = new Map<string, string>();
-    for (const row of (existingEntities ?? []) as {
-      id: string;
-      name: string;
-    }[]) {
-      byName.set(normalizeKey(row.name), row.id);
-    }
-
-    type EntityInsert = {
-      case_id: string;
-      user_id: string;
-      name: string;
-      kind: string;
-      role: string;
-      x: number;
-      y: number;
-    };
-    const toInsert: EntityInsert[] = [];
-    const queued = new Set<string>();
-    const queue = (name: string, kind: "person" | "company", role: string) => {
-      const key = normalizeKey(name);
-      if (!key || byName.has(key) || queued.has(key)) return;
-      if (toInsert.length >= MAX_ENTITIES) return;
-      queued.add(key);
-      const index = toInsert.length;
-      toInsert.push({
-        case_id: caseId,
-        user_id: context.userId,
-        name: name.trim(),
-        kind,
-        role,
-        // Rozloženie do mriežky, aby graf nezobrazil všetko na jednom bode.
-        x: 80 + (index % 5) * 90,
-        y: 80 + Math.floor(index / 5) * 90,
-      });
-    };
-
-    for (const person of data.persons) {
-      queue(person.name, "person", person.role?.trim() || "osoba");
-    }
-    for (const company of data.companies) queue(company, "company", "firma");
-
-    if (toInsert.length > 0) {
-      const { data: inserted, error } = await supabase
-        .from("case_entities")
-        .insert(toInsert)
-        .select("id, name");
-      if (error)
-        throw new Error(`Entity sa nepodarilo uložiť. (${error.message})`);
-      for (const row of (inserted ?? []) as { id: string; name: string }[]) {
-        byName.set(normalizeKey(row.name), row.id);
-      }
-    }
-
-    /* ------------------------------ časová os ----------------------------- */
-    const { data: existingEvents, error: eventsError } = await supabase
-      .from("case_events")
-      .select("date, title")
-      .eq("case_id", caseId);
-    if (eventsError)
-      throw new Error(
-        `Časovú os sa nepodarilo načítať. (${eventsError.message})`,
-      );
-
-    const eventKeys = new Set(
-      ((existingEvents ?? []) as { date: string; title: string }[]).map(
-        (row) => `${row.date}|${normalizeKey(row.title)}`,
-      ),
+    const graph = buildGraphCommit(data);
+    const { data: result, error } = await context.supabase.rpc(
+      "commit_ai_case_graph",
+      { _case_id: data.caseId, _graph: graph },
     );
-
-    const eventRows: {
-      case_id: string;
-      user_id: string;
-      date: string;
-      title: string;
-      detail: string;
-      severity: string;
-    }[] = [];
-    const relationPairs: { from: string; to: string; label: string }[] = [];
-
-    for (const item of data.timeline) {
-      const title = (item.event ?? item.detail ?? "").trim();
-      if (!title) continue;
-      const date = normalizeDate(item.date) ?? fallbackDate;
-      const key = `${date}|${normalizeKey(title)}`;
-      if (!eventKeys.has(key) && eventRows.length < MAX_EVENTS) {
-        eventKeys.add(key);
-        eventRows.push({
-          case_id: caseId,
-          user_id: context.userId,
-          date,
-          title: title.slice(0, 160),
-          detail: (item.detail ?? item.event ?? "").slice(0, 600),
-          severity: "medium",
-        });
-      }
-      // Osoby vystupujúce v tej istej udalosti sú v grafe prepojené.
-      const actorIds = (item.actors ?? [])
-        .map((actor) => byName.get(normalizeKey(actor)))
-        .filter((id): id is string => Boolean(id));
-      for (let i = 0; i < actorIds.length; i++) {
-        for (let j = i + 1; j < actorIds.length; j++) {
-          relationPairs.push({
-            from: actorIds[i]!,
-            to: actorIds[j]!,
-            label: title.slice(0, 80),
-          });
-        }
-      }
-    }
-
-    if (eventRows.length > 0) {
-      const { error } = await supabase.from("case_events").insert(eventRows);
-      if (error)
-        throw new Error(`Časovú os sa nepodarilo uložiť. (${error.message})`);
-    }
-
-    /* ------------------------------- vzťahy ------------------------------- */
-    const { data: existingRelations, error: relationsError } = await supabase
-      .from("case_relations")
-      .select("from_id, to_id")
-      .eq("case_id", caseId);
-    if (relationsError)
-      throw new Error(
-        `Vzťahy sa nepodarilo načítať. (${relationsError.message})`,
-      );
-
-    const relationKeys = new Set(
-      (
-        (existingRelations ?? []) as {
-          from_id: string | null;
-          to_id: string | null;
-        }[]
-      )
-        .filter((row) => row.from_id && row.to_id)
-        .map((row) => [row.from_id, row.to_id].sort().join("|")),
-    );
-
-    const relationRows: {
-      case_id: string;
-      user_id: string;
-      from_id: string;
-      to_id: string;
-      label: string;
-    }[] = [];
-    for (const pair of relationPairs) {
-      const key = [pair.from, pair.to].sort().join("|");
-      if (relationKeys.has(key)) continue;
-      if (relationRows.length >= MAX_RELATIONS) break;
-      relationKeys.add(key);
-      relationRows.push({
-        case_id: caseId,
-        user_id: context.userId,
-        from_id: pair.from,
-        to_id: pair.to,
-        label: pair.label || "spoločná udalosť",
-      });
-    }
-
-    if (relationRows.length > 0) {
-      const { error } = await supabase
-        .from("case_relations")
-        .insert(relationRows);
-      if (error)
-        throw new Error(`Vzťahy sa nepodarilo uložiť. (${error.message})`);
-    }
-
-    return {
-      entities: toInsert.length,
-      events: eventRows.length,
-      relations: relationRows.length,
-    };
+    if (error)
+      throw new Error(`Graf prípadu sa nepodarilo uložiť. (${error.message})`);
+    return commitResultSchema.parse(result);
   });
+
+const dossierTimelineSchema = z.object({
+  facts: z
+    .object({
+      timeline: z
+        .array(
+          z.object({
+            date: z.string().optional(),
+            event: z.string().optional(),
+            title: z.string().optional(),
+            description: z.string().optional(),
+            detail: z.string().optional(),
+            actors: z.array(z.union([z.string(), z.object({ name: z.string() })])).optional(),
+            persons: z.array(z.union([z.string(), z.object({ name: z.string() })])).optional(),
+            entities: z.array(z.union([z.string(), z.object({ name: z.string() })])).optional(),
+          }),
+        )
+        .optional(),
+    })
+    .optional(),
+});
 
 /** Z dossiera AI vytiahne položky časovej osi v tvare, ktorý prijíma zápis. */
 export function toTimelineInput(dossier: unknown): {
@@ -276,46 +196,22 @@ export function toTimelineInput(dossier: unknown): {
   detail?: string;
   actors?: string[];
 }[] {
-  const facts = (dossier as { facts?: { timeline?: unknown[] } })?.facts;
-  const rows = Array.isArray(facts?.timeline) ? facts.timeline : [];
-  const out: {
-    date?: string;
-    event?: string;
-    detail?: string;
-    actors?: string[];
-  }[] = [];
-  for (const raw of rows.slice(0, 200)) {
-    const row = raw as {
-      date?: unknown;
-      event?: unknown;
-      title?: unknown;
-      description?: unknown;
-      detail?: unknown;
-      actors?: unknown;
-      persons?: unknown;
-      entities?: unknown;
-    };
-    const text = (v: unknown) => (typeof v === "string" ? v.trim() : "");
-    const event = text(row.event) || text(row.title);
-    const detail = text(row.detail) || text(row.description);
-    if (!event && !detail) continue;
-    const actorsRaw = [row.actors, row.persons, row.entities].find(
-      Array.isArray,
-    ) as unknown[] | undefined;
-    const actors = (actorsRaw ?? [])
-      .map((a) =>
-        typeof a === "string"
-          ? a.trim()
-          : text((a as { name?: unknown })?.name),
-      )
+  const parsed = dossierTimelineSchema.safeParse(dossier);
+  if (!parsed.success) return [];
+  return (parsed.data.facts?.timeline ?? []).slice(0, 200).flatMap((row) => {
+    const event = row.event?.trim() || row.title?.trim();
+    const detail = row.detail?.trim() || row.description?.trim();
+    if (!event && !detail) return [];
+    const rawActors = row.actors ?? row.persons ?? row.entities ?? [];
+    const actors = rawActors
+      .map((actor) => (typeof actor === "string" ? actor : actor.name).trim())
       .filter(Boolean)
       .slice(0, 20);
-    out.push({
-      ...(text(row.date) ? { date: text(row.date) } : {}),
+    return [{
+      ...(row.date?.trim() ? { date: row.date.trim() } : {}),
       ...(event ? { event } : {}),
       ...(detail ? { detail } : {}),
       ...(actors.length ? { actors } : {}),
-    });
-  }
-  return out;
+    }];
+  });
 }

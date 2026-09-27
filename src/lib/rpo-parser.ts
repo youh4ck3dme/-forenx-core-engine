@@ -14,6 +14,8 @@ export type RpoStakeholder = {
   depositAmount: number | null;
   paidAmount: number | null;
   currency: string | null;
+  validFrom: string | null;
+  validTo: string | null;
 };
 
 export type RpoDeposit = {
@@ -85,6 +87,13 @@ function currencyCode(value: unknown): string | null {
 function codedValue(value: unknown): string | null {
   const record = asRecord(value);
   return text(record?.["value"]) ?? text(value);
+}
+
+function rpoDate(value: unknown): string | null {
+  const candidate = text(value);
+  return candidate && /^\d{4}-\d{2}-\d{2}$/.test(candidate)
+    ? candidate
+    : null;
 }
 
 /** Ulica + číslo, PSČ a obec v tvare, aký používa RPO. */
@@ -245,6 +254,8 @@ export function parseOfficialRpoEntity(entity: unknown): OfficialRpoRecord {
             ? (shareCapital?.paidAmount ?? matched.amount)
             : null,
         currency: matched?.currency ?? shareCapital?.currency ?? null,
+        validFrom: rpoDate(row["validFrom"]),
+        validTo: rpoDate(row["validTo"]),
       };
       return parsed;
     })
@@ -359,6 +370,8 @@ export function rpoDetailsFromUnknown(raw: unknown): OfficialRpoRecord | null {
         depositAmount: amount(row["deposit_amount"]),
         paidAmount: amount(row["paid_amount"]),
         currency: text(row["currency"]),
+        validFrom: null,
+        validTo: null,
       };
       return parsed;
     })

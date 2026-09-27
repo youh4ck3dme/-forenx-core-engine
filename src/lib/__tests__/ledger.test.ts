@@ -93,4 +93,11 @@ describe("Chain of Custody Ledger (Tamper-evident SHA-256)", () => {
     expect(result.brokenIndex).toBe(0);
     expect(result.reason).toContain("Kryptografická neplatnosť");
   });
+
+  it("hashuje objektový payload kanonicky bez ohľadu na poradie kľúčov", async () => {
+    const { computePayloadHash } = await import("../ledger");
+    expect(computePayloadHash({ b: 2, a: { z: 1, y: 2 } })).toBe(
+      computePayloadHash({ a: { y: 2, z: 1 }, b: 2 }),
+    );
+  });
 });
