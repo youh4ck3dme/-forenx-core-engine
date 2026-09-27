@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import * as XLSX from "xlsx";
+import { statusLabel } from "@/components/malte/UploadFileList";
+import ExcelJS from "exceljs";
 import {
   classifyExtractResult,
   extractSingleBufferText,
@@ -9,7 +10,6 @@ import {
   countPdfPages,
   isMemoryConstrainedBrowser,
 } from "../upload-prep";
-import { statusLabel } from "@/components/malte/UploadFileList";
 
 describe("Bulk Media Sandbox & File Extraction", () => {
   it("extrahuje čistý text z TXT súboru", async () => {
@@ -57,26 +57,40 @@ describe("Bulk Media Sandbox & File Extraction", () => {
     expect(res.text).not.toContain("<h1>");
   });
 
-  it("extrahuje tabuľky z XLSX súboru", async () => {
-    const wb = XLSX.utils.book_new();
-    const wsData = [
-      ["ID", "Dátum", "Suma", "Typ"],
-      ["SF-01", "2025-01-22", 32000, "Hotovosť"],
-      ["SF-02", "2025-01-23", 31850, "Prevod"],
-    ];
-    const ws = XLSX.utils.aoa_to_sheet(wsData);
-    XLSX.utils.book_append_sheet(wb, ws, "Platby");
-    const xlsxBuffer = XLSX.write(wb, {
-      type: "buffer",
-      bookType: "xlsx",
-    }) as Buffer;
-    const base64 = xlsxBuffer.toString("base64");
+  async function workbookBase64(sheets: Array<{ name: string; rows: Array<Array<string | number>> }>): Promise<string> {
+    const workbook = new ExcelJS.Workbook();
+    for (const sheet of sheets) workbook.addWorksheet(sheet.name).addRows(sheet.rows);
+    return Buffer.from(await workbook.xlsx.writeBuffer()).toString("base64");
+  }
 
+  it("extrahuje tabuľky z XLSX súboru vrátane značiek hárkov", async () => {
+    const base64 = await workbookBase64([{ name: "Platby", rows: [["ID", "Suma"], ["SF-01", 32000]] }, { name: "Poznámky", rows: [["Overiť pôvod platby"]] }]);
     const res = await extractSingleBufferText("transakcie.xlsx", base64);
     expect(res.success).toBe(true);
-    expect(res.text).toContain("SF-01");
-    expect(res.text).toContain("32000");
-    expect(res.text).toContain("Platby");
+    expect(res.text).toContain("--- HÁROK: Platby ---");
+    expect(res.text).toContain("SF-01,32000");
+    expect(res.text).toContain("--- HÁROK: Poznámky ---");
+  });
+
+  it("odmietne starý XLS formát", async () => {
+    await expect(extractSingleBufferText("stary.xls", Buffer.from("legacy").toString("base64"))).rejects.toThrow(/nie je podporovaný.*\.xlsx/i);
+  });
+
+  it("odmietne poškodený XLSX archív", async () => {
+    await expect(extractSingleBufferText("poskodeny.xlsx", Buffer.from("nie je zip").toString("base64"))).rejects.toThrow(/platnú štruktúru XLSX/);
+  });
+
+  it("odmietne XLSX hárok s príliš veľkým počtom stĺpcov", async () => {
+    const base64 = await workbookBase64([{ name: "Príliš široký", rows: [Array.from({ length: 201 }, () => "hodnota")] }]);
+    await expect(extractSingleBufferText("siroky.xlsx", base64)).rejects.toThrow(/limit 200 stĺpcov/);
+  });
+
+  it("spracuje názvy hárkov s kľúčmi nebezpečnými pre prototyp", async () => {
+    const base64 = await workbookBase64([{ name: "__proto__", rows: [["bezpečné"]] }, { name: "constructor", rows: [["tiež bezpečné"]] }]);
+    const res = await extractSingleBufferText("kluce.xlsx", base64);
+    expect(res.text).toContain("--- HÁROK: __proto__ ---");
+    expect(res.text).toContain("--- HÁROK: constructor ---");
+    expect(Object.prototype.hasOwnProperty.call(Object.prototype, "bezpečné")).toBe(false);
   });
 
   it("označí príliš krátky text ako zlyhanie súboru, nie tichý úspech", () => {
@@ -164,6 +178,7 @@ describe("Multi-file intake queue", () => {
     expect(res.pages).toBe(2);
     expect(res.blockedReason).toBeUndefined();
   });
+
 
   it("stavy fronty majú slovenské označenia", () => {
     expect(statusLabel("queued")).toBe("čaká");

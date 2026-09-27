@@ -1,4 +1,5 @@
 import { createServerFn } from "@tanstack/react-start";
+import readXlsxFile from "read-excel-file/node";
 import { z } from "zod";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import { analyzeCase, type CaseAnalysis } from "@/forensic";
@@ -47,6 +48,101 @@ export const UPLOAD_MAX_BASE64_CHARS = 12_000_000;
 export const UPLOAD_MAX_TEXT_CHARS = 2_000_000;
 /** Maximálny počet súborov v jednej hromadnej požiadavke. */
 export const UPLOAD_MAX_FILES = 20;
+
+const MAX_XLSX_INPUT_BYTES = 8 * 1024 * 1024;
+const MAX_XLSX_SHEETS = 25;
+const MAX_XLSX_ROWS_PER_SHEET = 20_000;
+const MAX_XLSX_COLUMNS = 200;
+const MAX_XLSX_CELLS = 200_000;
+const MAX_XLSX_CELL_CHARS = 32_768;
+const MAX_XLSX_ARCHIVE_ENTRIES = 2_000;
+const MAX_XLSX_UNCOMPRESSED_BYTES = 64 * 1024 * 1024;
+
+function rejectXlsx(message: string): never {
+  throw new Error("XLSX: " + message);
+}
+
+function validateXlsxArchive(buffer: Buffer): void {
+  if (buffer.length > MAX_XLSX_INPUT_BYTES) rejectXlsx("Súbor XLSX je príliš veľký (maximálne 8 MiB).");
+  if (buffer.length < 22 || buffer.readUInt32LE(0) !== 0x04034b50) rejectXlsx("Súbor nemá platnú štruktúru XLSX.");
+  let eocd = -1;
+  for (let offset = buffer.length - 22; offset >= Math.max(0, buffer.length - 65_557); offset -= 1) {
+    if (buffer.readUInt32LE(offset) === 0x06054b50) { eocd = offset; break; }
+  }
+  if (eocd === -1) rejectXlsx("Súbor XLSX nemá platný centrálny adresár.");
+  const entries = buffer.readUInt16LE(eocd + 10);
+  const entriesOnDisk = buffer.readUInt16LE(eocd + 8);
+  const directorySize = buffer.readUInt32LE(eocd + 12);
+  const directoryOffset = buffer.readUInt32LE(eocd + 16);
+  if (entries !== entriesOnDisk || entries === 0xffff || directorySize === 0xffffffff || directoryOffset === 0xffffffff || entries > MAX_XLSX_ARCHIVE_ENTRIES || directoryOffset + directorySize > eocd) rejectXlsx("Súbor XLSX prekračuje bezpečnostné limity archívu.");
+  let offset = directoryOffset;
+  let uncompressedBytes = 0;
+  const names = new Set<string>();
+  for (let index = 0; index < entries; index += 1) {
+    if (offset + 46 > eocd || buffer.readUInt32LE(offset) !== 0x02014b50) rejectXlsx("Súbor XLSX má poškodený centrálny adresár.");
+    const flags = buffer.readUInt16LE(offset + 8);
+    const compressedSize = buffer.readUInt32LE(offset + 20);
+    const uncompressedSize = buffer.readUInt32LE(offset + 24);
+    const nameLength = buffer.readUInt16LE(offset + 28);
+    const extraLength = buffer.readUInt16LE(offset + 30);
+    const commentLength = buffer.readUInt16LE(offset + 32);
+    const localOffset = buffer.readUInt32LE(offset + 42);
+    const nextOffset = offset + 46 + nameLength + extraLength + commentLength;
+    const name = buffer.toString("utf8", offset + 46, offset + 46 + nameLength);
+    if (nextOffset > eocd || (flags & 1) !== 0 || !name || name.startsWith("/") || name.includes("\\") || name.split("/").some((part) => part === "." || part === ".." || part === "__proto__" || part === "prototype" || part === "constructor") || names.has(name)) rejectXlsx("Súbor XLSX obsahuje nebezpečnú položku.");
+    if (localOffset + 30 > directoryOffset || buffer.readUInt32LE(localOffset) !== 0x04034b50) rejectXlsx("Súbor XLSX obsahuje neplatnú lokálnu položku.");
+    names.add(name);
+    uncompressedBytes += uncompressedSize;
+    if (uncompressedBytes > MAX_XLSX_UNCOMPRESSED_BYTES || compressedSize > buffer.length) rejectXlsx("Rozbalený obsah XLSX prekračuje bezpečnostný limit.");
+    offset = nextOffset;
+  }
+  if (offset !== directoryOffset + directorySize) rejectXlsx("Súbor XLSX má nekonzistentný centrálny adresár.");
+}
+
+function escapeCsvCell(value: string): string {
+  return /[",\n\r]/.test(value) ? '"' + value.replace(/"/g, '""') + '"' : value;
+}
+
+async function extractXlsxText(buffer: Buffer): Promise<string> {
+  try {
+    validateXlsxArchive(buffer);
+    const parserBuffer = Buffer.from(new ArrayBuffer(buffer.length));
+    buffer.copy(parserBuffer);
+    const worksheets = await readXlsxFile(parserBuffer);
+    if (worksheets.length > MAX_XLSX_SHEETS) rejectXlsx("Súbor XLSX obsahuje viac než " + MAX_XLSX_SHEETS + " hárkov.");
+    const sheetTexts: string[] = [];
+    let outputLength = 0;
+    let totalCells = 0;
+    for (const worksheet of worksheets) {
+      if (worksheet.data.length > MAX_XLSX_ROWS_PER_SHEET) rejectXlsx("Hárok „" + worksheet.sheet + "“ prekračuje limit " + MAX_XLSX_ROWS_PER_SHEET + " riadkov.");
+      const rows: string[] = [];
+      for (const row of worksheet.data) {
+        if (row.length > MAX_XLSX_COLUMNS) rejectXlsx("Hárok „" + worksheet.sheet + "“ prekračuje limit " + MAX_XLSX_COLUMNS + " stĺpcov.");
+        totalCells += row.length;
+        if (totalCells > MAX_XLSX_CELLS) rejectXlsx("Súbor XLSX prekračuje limit " + MAX_XLSX_CELLS + " buniek.");
+        const values: string[] = [];
+        for (const cell of row) {
+          const value = cell === null ? "" : String(cell);
+          if (value.length > MAX_XLSX_CELL_CHARS) rejectXlsx("Bunka v hárku „" + worksheet.sheet + "“ prekračuje limit " + MAX_XLSX_CELL_CHARS + " znakov.");
+          values.push(escapeCsvCell(value));
+        }
+        const csvRow = values.join(",");
+        if (csvRow.trim()) rows.push(csvRow);
+      }
+      const sheetText = rows.join("\n").trim();
+      if (sheetText) {
+        const marker = "--- HÁROK: " + worksheet.sheet + " ---\n";
+        outputLength += marker.length + sheetText.length + (sheetTexts.length === 0 ? 0 : 2);
+        if (outputLength > UPLOAD_MAX_TEXT_CHARS) rejectXlsx("Extrahovaný text XLSX prekračuje limit " + UPLOAD_MAX_TEXT_CHARS + " znakov.");
+        sheetTexts.push(marker + sheetText);
+      }
+    }
+    return sheetTexts.join("\n\n");
+  } catch (error: unknown) {
+    if (error instanceof Error && error.message.startsWith("XLSX: ")) throw new Error(error.message.slice(6));
+    throw new Error("Súbor XLSX je neplatný alebo poškodený.");
+  }
+}
 
 const uploadFileSchema = z.object({
   fileName: z.string().min(1).max(512),
@@ -731,34 +827,13 @@ export async function extractSingleBufferText(
     return { success: true, text, charCount: text.length, fileName };
   }
 
-  // 3. Tabuľky Excel (XLSX, XLS)
-  if (lower.endsWith(".xlsx") || lower.endsWith(".xls")) {
-    try {
-      const XLSX = await import("xlsx");
-      const workbook = XLSX.read(buffer, { type: "buffer" });
-      const sheetTexts: string[] = [];
-      for (const sheetName of workbook.SheetNames) {
-        const sheet = workbook.Sheets[sheetName];
-        if (!sheet) continue;
-        const csv = XLSX.utils.sheet_to_csv(sheet);
-        if (csv.trim()) {
-          sheetTexts.push(`--- HÁROK: ${sheetName} ---\n${csv.trim()}`);
-        }
-      }
-      const text = sheetTexts.join("\n\n");
-      return {
-        success: true,
-        text,
-        charCount: text.length,
-        fileName,
-        usedOcr: false,
-      };
-    } catch (err: unknown) {
-      throw new Error(
-        (err instanceof Error ? err.message : null) ||
-          "Extrakcia Excel (XLSX/XLS) tabuľky zlyhala.",
-      );
-    }
+  // 3. Tabuľky Excel (iba XLSX)
+  if (lower.endsWith(".xls")) {
+    throw new Error("Formát .xls nie je podporovaný z bezpečnostných dôvodov. Uložte súbor ako .xlsx.");
+  }
+  if (lower.endsWith(".xlsx")) {
+    const text = await extractXlsxText(buffer);
+    return { success: true, text, charCount: text.length, fileName, usedOcr: false };
   }
 
   // 4. PDF dokumenty s automatickým OCR fallbackom
@@ -893,7 +968,7 @@ export async function extractSingleBufferText(
   }
 
   throw new Error(
-    `Nepodporovaný formát: ${fileName}. Podporované sú .pdf, .docx, .xlsx, .xls, .txt, .md, .csv, .json, .png, .jpg, .webp, .html, .rtf`,
+    `Nepodporovaný formát: ${fileName}. Podporované sú .pdf, .docx, .xlsx, .txt, .md, .csv, .json, .png, .jpg, .webp, .html, .rtf`,
   );
 }
 
